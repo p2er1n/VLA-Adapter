@@ -565,7 +565,7 @@ class Server:
                 # Process action
                 for action in actions:
                     action = process_action(action, cfg.model_family)
-                    preocessed_actions.append(action)
+                    preocessed_actions.append(action.tolist())
                 return preocessed_actions
 
             action = run_episode_modified(
