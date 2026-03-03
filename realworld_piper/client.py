@@ -44,13 +44,13 @@ def read_state(piper: C_PiperInterface_V2) -> list[float]:
     return read_eef_state_m(piper) + read_gripper_qpos_m(piper)
 
 
-def read_camera_frame(cap: cv2.VideoCapture, camera_name: str) -> list:
+def read_camera_frame(cap: cv2.VideoCapture, camera_name: str) -> tuple[list, Any]:
     ok, frame = cap.read()
     if not ok or frame is None:
         raise RuntimeError(f"Failed to read frame from {camera_name}")
 
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    return rgb.tolist()
+    return rgb.tolist(), frame
 
 
 def build_payload(
@@ -58,13 +58,21 @@ def build_payload(
     full_cam: cv2.VideoCapture,
     wrist_cam: cv2.VideoCapture,
     instruction: str,
-) -> dict[str, Any]:
-    return {
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    full_image, full_preview = read_camera_frame(full_cam, "full camera")
+    wrist_image, wrist_preview = read_camera_frame(wrist_cam, "wrist camera")
+
+    payload = {
         "instruction": instruction,
         "state": read_state(piper),
-        "full_image": read_camera_frame(full_cam, "full camera"),
-        "wrist_image": read_camera_frame(wrist_cam, "wrist camera"),
+        "full_image": full_image,
+        "wrist_image": wrist_image,
     }
+    preview_frames = {
+        "full": full_preview,
+        "wrist": wrist_preview,
+    }
+    return payload, preview_frames
 
 
 def parse_args() -> argparse.Namespace:
@@ -107,7 +115,12 @@ def main() -> None:
 
     try:
         while True:
-            payload = build_payload(piper, full_cam, wrist_cam, args.instruction)
+            payload, preview_frames = build_payload(piper, full_cam, wrist_cam, args.instruction)
+
+            cv2.imshow("full_camera", preview_frames["full"])
+            cv2.imshow("wrist_camera", preview_frames["wrist"])
+            cv2.waitKey(1)
+
             response = requests.post(args.server_endpoint, json=payload, timeout=30)
             response.raise_for_status()
 
@@ -122,6 +135,7 @@ def main() -> None:
     finally:
         full_cam.release()
         wrist_cam.release()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
