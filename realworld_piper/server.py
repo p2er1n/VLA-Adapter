@@ -616,7 +616,8 @@ def start_server(cfg: GenerateConfig) -> None:
     # Get expected image dimensions
     resize_size = get_image_resize_size(cfg)
     
-    server = Server(model, 
+    server = Server(cfg,
+                    model, 
                     action_head, 
                     proprio_projector, 
                     noisy_action_projector, 
