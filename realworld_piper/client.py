@@ -162,7 +162,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-delay", type=float, default=0.01, help="Seconds between executing returned actions")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
-    parser.add_argument("--once", action="store_true", help="Send one request and exit")
     return parser.parse_args()
 
 
@@ -221,9 +220,6 @@ def main() -> None:
             print("state:", payload["state"])
             print("actions:", actions)
             send_action_sequence(piper, actions, args.action_delay)
-
-            if args.once:
-                break
 
             time.sleep(args.period)
     finally:
