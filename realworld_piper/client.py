@@ -120,13 +120,13 @@ def send_action_sequence(
         time.sleep(action_delay)
 
 
-def read_camera_frame(cap: cv2.VideoCapture, camera_name: str) -> tuple[list, Any]:
+def read_camera_frame(cap: cv2.VideoCapture, camera_name: str) -> list:
     ok, frame = cap.read()
     if not ok or frame is None:
         raise RuntimeError(f"Failed to read frame from {camera_name}")
 
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    return rgb.tolist(), frame
+    return rgb.tolist()
 
 
 def build_payload(
@@ -134,9 +134,9 @@ def build_payload(
     full_cam: cv2.VideoCapture,
     wrist_cam: cv2.VideoCapture,
     instruction: str,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    full_image, full_preview = read_camera_frame(full_cam, "full camera")
-    wrist_image, wrist_preview = read_camera_frame(wrist_cam, "wrist camera")
+) -> dict[str, Any]:
+    full_image = read_camera_frame(full_cam, "full camera")
+    wrist_image = read_camera_frame(wrist_cam, "wrist camera")
 
     payload = {
         "instruction": instruction,
@@ -144,11 +144,7 @@ def build_payload(
         "full_image": full_image,
         "wrist_image": wrist_image,
     }
-    preview_frames = {
-        "full": full_preview,
-        "wrist": wrist_preview,
-    }
-    return payload, preview_frames
+    return payload
 
 
 def parse_args() -> argparse.Namespace:
@@ -182,14 +178,11 @@ def warmup_cameras(full_cam: cv2.VideoCapture, wrist_cam: cv2.VideoCapture) -> N
         ok_full, full_frame = full_cam.read()
         ok_wrist, wrist_frame = wrist_cam.read()
 
-        if not ok_full or full_frame is None:
-            raise RuntimeError("Failed to warm up full camera")
-        if not ok_wrist or wrist_frame is None:
-            raise RuntimeError("Failed to warm up wrist camera")
+        if not ok_full or full_frame is None or not ok_wrist or wrist_frame is None:
+            time.sleep(0.01)
+            continue
 
-        cv2.imshow("full_camera", full_frame)
-        cv2.imshow("wrist_camera", wrist_frame)
-        cv2.waitKey(1)
+        time.sleep(0.005)
 
 
 def main() -> None:
@@ -203,15 +196,11 @@ def main() -> None:
 
     full_cam = configure_camera(args.full_camera_index, args.width, args.height)
     wrist_cam = configure_camera(args.wrist_camera_index, args.width, args.height)
-    warmup_cameras(full_cam, wrist_cam)
 
     try:
+        warmup_cameras(full_cam, wrist_cam)
         while True:
-            payload, preview_frames = build_payload(piper, full_cam, wrist_cam, args.instruction)
-
-            cv2.imshow("full_camera", preview_frames["full"])
-            cv2.imshow("wrist_camera", preview_frames["wrist"])
-            cv2.waitKey(1)
+            payload = build_payload(piper, full_cam, wrist_cam, args.instruction)
 
             response = requests.post(args.server_endpoint, json=payload, timeout=30)
             response.raise_for_status()
@@ -225,7 +214,6 @@ def main() -> None:
     finally:
         full_cam.release()
         wrist_cam.release()
-        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
