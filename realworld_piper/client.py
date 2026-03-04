@@ -2,11 +2,14 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import json
 import math
+from pathlib import Path
 import time
 from typing import Any
 
 import cv2
+import numpy as np
 import requests
 
 from piper_sdk import C_PiperInterface_V2
@@ -158,6 +161,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-delay", type=float, default=0.01, help="Seconds between executing returned actions")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
+    parser.add_argument(
+        "--save-request-dir",
+        type=str,
+        default=None,
+        help="If set, save each request/response/images to a per-request subfolder in this directory",
+    )
     return parser.parse_args()
 
 
@@ -185,8 +194,37 @@ def warmup_cameras(full_cam: cv2.VideoCapture, wrist_cam: cv2.VideoCapture) -> N
         time.sleep(0.005)
 
 
+def save_request_record(
+    save_root: Path,
+    request_idx: int,
+    payload: dict[str, Any],
+    response_json: Any,
+    response_text: str,
+) -> None:
+    request_dir = save_root / f"request_{request_idx:06d}"
+    request_dir.mkdir(parents=True, exist_ok=False)
+
+    with open(request_dir / "request.json", "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+
+    with open(request_dir / "response.json", "w", encoding="utf-8") as f:
+        json.dump(response_json, f, ensure_ascii=False)
+
+    with open(request_dir / "response_raw.txt", "w", encoding="utf-8") as f:
+        f.write(response_text)
+
+    full_rgb = np.asarray(payload["full_image"], dtype=np.uint8)
+    wrist_rgb = np.asarray(payload["wrist_image"], dtype=np.uint8)
+    cv2.imwrite(str(request_dir / "full_image.png"), cv2.cvtColor(full_rgb, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(str(request_dir / "wrist_image.png"), cv2.cvtColor(wrist_rgb, cv2.COLOR_RGB2BGR))
+
+
 def main() -> None:
     args = parse_args()
+    save_root = Path(args.save_request_dir) if args.save_request_dir else None
+    if save_root is not None:
+        save_root.mkdir(parents=True, exist_ok=True)
+    request_idx = 0
 
     piper = C_PiperInterface_V2(args.can_port)
     piper.ConnectPort()
@@ -206,6 +244,15 @@ def main() -> None:
             response.raise_for_status()
 
             actions = response.json()
+            if save_root is not None:
+                request_idx += 1
+                save_request_record(
+                    save_root=save_root,
+                    request_idx=request_idx,
+                    payload=payload,
+                    response_json=actions,
+                    response_text=response.text,
+                )
             print("state:", payload["state"])
             print("actions:", actions)
             send_action_sequence(piper, actions, args.action_delay)
