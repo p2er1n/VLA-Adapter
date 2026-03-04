@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 from pathlib import Path
+import threading
 import time
 from typing import Any
 
@@ -22,6 +23,8 @@ GRIPPER_OPEN_STROKE_M = 0.03 * 2.0
 GRIPPER_CLOSE_STROKE_M = 0.01 * 2.0
 GRIPPER_EFFORT = 1000
 SDK_ENABLE_CODE = 0x01
+FRAME_LOCK = threading.Lock()
+LATEST_FRAMES = {"full": None, "wrist": None}
 
 
 def pos_m_to_sdk(value_m: float) -> int:
@@ -123,23 +126,19 @@ def send_action_sequence(
         time.sleep(action_delay)
 
 
-def read_camera_frame(cap: cv2.VideoCapture, camera_name: str) -> list:
-    ok, frame = cap.read()
-    if not ok or frame is None:
-        raise RuntimeError(f"Failed to read frame from {camera_name}")
-
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    return rgb.tolist()
-
-
 def build_payload(
     piper: C_PiperInterface_V2,
-    full_cam: cv2.VideoCapture,
-    wrist_cam: cv2.VideoCapture,
     instruction: str,
 ) -> dict[str, Any]:
-    full_image = read_camera_frame(full_cam, "full camera")
-    wrist_image = read_camera_frame(wrist_cam, "wrist camera")
+    with FRAME_LOCK:
+        full_frame = None if LATEST_FRAMES["full"] is None else LATEST_FRAMES["full"].copy()
+        wrist_frame = None if LATEST_FRAMES["wrist"] is None else LATEST_FRAMES["wrist"].copy()
+
+    if full_frame is None or wrist_frame is None:
+        raise RuntimeError("Latest camera frames are not ready yet")
+
+    full_image = cv2.cvtColor(full_frame, cv2.COLOR_BGR2RGB).tolist()
+    wrist_image = cv2.cvtColor(wrist_frame, cv2.COLOR_BGR2RGB).tolist()
 
     payload = {
         "instruction": instruction,
@@ -177,17 +176,35 @@ def configure_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     return cap
 
 
-def warmup_cameras(full_cam: cv2.VideoCapture, wrist_cam: cv2.VideoCapture) -> None:
-    start_time = time.time()
-    while time.time() - start_time < CAMERA_WARMUP_SECONDS:
+def capture_worker(
+    full_cam: cv2.VideoCapture,
+    wrist_cam: cv2.VideoCapture,
+    stop_event: threading.Event,
+) -> None:
+    while not stop_event.is_set():
         ok_full, full_frame = full_cam.read()
         ok_wrist, wrist_frame = wrist_cam.read()
 
-        if not ok_full or full_frame is None or not ok_wrist or wrist_frame is None:
+        if ok_full and full_frame is not None and ok_wrist and wrist_frame is not None:
+            with FRAME_LOCK:
+                LATEST_FRAMES["full"] = full_frame
+                LATEST_FRAMES["wrist"] = wrist_frame
+
+        time.sleep(0.001)
+
+
+def warmup_cameras() -> None:
+    start_time = time.time()
+    while time.time() - start_time < CAMERA_WARMUP_SECONDS:
+        with FRAME_LOCK:
+            full_ready = LATEST_FRAMES["full"] is not None
+            wrist_ready = LATEST_FRAMES["wrist"] is not None
+        if not (full_ready and wrist_ready):
             time.sleep(0.01)
             continue
 
@@ -225,6 +242,7 @@ def main() -> None:
     if save_root is not None:
         save_root.mkdir(parents=True, exist_ok=True)
     request_idx = 0
+    stop_event = threading.Event()
 
     piper = C_PiperInterface_V2(args.can_port)
     piper.ConnectPort()
@@ -234,11 +252,13 @@ def main() -> None:
 
     full_cam = configure_camera(args.full_camera_index, args.width, args.height)
     wrist_cam = configure_camera(args.wrist_camera_index, args.width, args.height)
+    capture_thread = threading.Thread(target=capture_worker, args=(full_cam, wrist_cam, stop_event), daemon=True)
+    capture_thread.start()
 
     try:
-        warmup_cameras(full_cam, wrist_cam)
+        warmup_cameras()
         while True:
-            payload = build_payload(piper, full_cam, wrist_cam, args.instruction)
+            payload = build_payload(piper, args.instruction)
 
             response = requests.post(args.server_endpoint, json=payload, timeout=30)
             response.raise_for_status()
@@ -259,6 +279,8 @@ def main() -> None:
 
             time.sleep(args.period)
     finally:
+        stop_event.set()
+        capture_thread.join(timeout=1.0)
         full_cam.release()
         wrist_cam.release()
 
