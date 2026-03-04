@@ -3,6 +3,7 @@ data_root_dir=/root/autodl-tmp/data/libero
 data_name=pick_and_place_1_50
 run_root_dir=/root/autodl-tmp/outputs
 logs_dir=/root/autodl-tmp/logs
+run_note=
 
 bs=8
 grad_acc_steps=2
@@ -34,5 +35,5 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-s
 --use_pro_version True \
 --wandb_entity "sjh-xidian-university" \
 --wandb_project "VLA-Adapter-realworld" \
---run_id_note VLA-Adapter-realworld--"$data_name"--"$bs-$grad_acc_steps-$lr"--$current_time \
-> "$logs_dir"/VLA-Adapter-realworld--"$data_name"--"$bs-$grad_acc_steps-$lr"--$current_time.log 2>&1 &
+--run_id_note VLA-Adapter-realworld--"$data_name"--"$run_note"--"$bs-$grad_acc_steps-$lr"--$current_time \
+> "$logs_dir"/VLA-Adapter-realworld--"$data_name"--"$run_note"--"$bs-$grad_acc_steps-$lr"--$current_time.log 2>&1 &
