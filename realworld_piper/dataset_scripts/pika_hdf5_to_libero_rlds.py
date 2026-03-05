@@ -30,13 +30,13 @@ Notes:
 # 原来hdf5文件中的数据含义如下：
 ## /arm/endPose/piper_end：（len， 6），表示机械臂的EEF state，绝对值
 ## /gripper/encoderDistance/pika：（len， 1）,表示两个夹爪之间的距离，绝对值
-## /camera/color/pikaDepthCamera: (len，480，640，3)，表示第三人称摄像头图片，BGR格式，480*640分辨率
-## /camera/color/pikaFisheyeCamera: (len，480，640，3)，表示腕部摄像头图片，BGR格式，480*640分辨率
+## /camera/color/pikaDepthCamera: (len，480，640，3)，表示腕部摄像头图片，BGR格式，480*640分辨率
+## /camera/color/pikaFisheyeCamera: (len，480，640，3)，表示第三人称摄像头图片，BGR格式，480*640分辨率
 # 转换后的rlds数据集中的数据含义如下（每个轨迹中的一步）：
 ## action：（7，），前六维：相对值，EEF格式，表示下一个EEF状态和当前EEF状态的差值；最后一维：绝对值，二值化，-1表示夹爪打开，1表示夹爪闭合
 ## obeservation.state：（8，），前六维：绝对值，EEF state，表示机械臂EEF当前的状态（也就是hdf5的piper_end）；后两维：绝对值，第七维表示左夹爪到闭合处的距离（正值），第八维表示右夹爪到闭合处的距离的绝对值的负数（负值），比如：两个夹爪的距离为0.08，第七维为0.04，第八维为-0.04
-## observation.image：（256, 256, 3），第三人称摄像头图片，RGB格式，分辨率为256*256，对应hdf5的pikaDepthCamera
-## observation.wrist_image：（256, 256, 3），腕部摄像头图片，RGB格式，分辨率为256*256，对应hdf5的pikaFisheyeCamera
+## observation.image：（256, 256, 3），第三人称摄像头图片，RGB格式，分辨率为256*256，对应hdf5的pikaFisheyeCamera
+## observation.wrist_image：（256, 256, 3），腕部摄像头图片，RGB格式，分辨率为256*256，对应hdf5的pikaDepthCamera
 ## language_instruction：bytes类型数据，表示当前轨迹的任务的指令，从命令行参数中获取
 # 转换步骤：
 ## 1. 命令行参数指定文件夹，该文件夹下存放有episode<n>.hdf5命名的文件若干
@@ -47,8 +47,8 @@ Notes:
 ## 6. 加载一个hdf5文件，
 ### 这个轨迹的第一步的observation.state[:6] = piper_end[0]，
 ### 这个轨迹的第一步的observation.state[-2:] = "encoderDistance/pika"[0]/2，-"encoderDistance/pika"[0]/2
-### 这个轨迹的第一步的observation.image = bgr_to_rgb(resize(pikaDepthCamera[0], (256, 256)))
-### 这个轨迹的第一步的observation.wrist_image = bgr_to_rgb(resize(pikaFisheyeCamera[0], (256, 256)))
+### 这个轨迹的第一步的observation.image = bgr_to_rgb(resize(pikaFisheyeCamera[0], (256, 256)))
+### 这个轨迹的第一步的observation.wrist_image = bgr_to_rgb(resize(pikaDepthCamera[0], (256, 256)))
 ### 这个轨迹的第一步的action[:6] = piper_end[delta] - piper_end[0]
 ### 这个轨迹的第一步的action[6]：
 #### 计算两步之间的夹爪距离的差值，设定一个阈值，如果是负值并且绝对值超过阈值，就认为夹爪是“闭合”状态，如果是正值并且绝对值超过阈值，就认为夹爪是“打开”状态，如果绝对值没有超过阈值，就认为夹爪停在当前状态（之前是“闭合”就是“闭合”，之前是“打开”就是“打开”）。
@@ -230,8 +230,8 @@ def load_episode_steps(
     with h5py.File(hdf5_path, "r") as handle:
         eef_state = np.asarray(handle["/arm/endPose/piper_end"], dtype=np.float32)
         gripper_distance = np.asarray(handle["/gripper/encoderDistance/pika"], dtype=np.float32)
-        third_person_bgr = np.asarray(handle["/camera/color/pikaDepthCamera"], dtype=np.uint8)
-        wrist_bgr = np.asarray(handle["/camera/color/pikaFisheyeCamera"], dtype=np.uint8)
+        third_person_bgr = np.asarray(handle["/camera/color/pikaFisheyeCamera"], dtype=np.uint8)
+        wrist_bgr = np.asarray(handle["/camera/color/pikaDepthCamera"], dtype=np.uint8)
 
     if gripper_distance.ndim != 1:
         raise ValueError(
