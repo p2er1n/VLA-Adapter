@@ -72,6 +72,7 @@ def send_action_sequence(
     piper: C_PiperInterface_V2,
     actions: list[list[float]],
     action_delay: float,
+    motion_speed_percent: int,
 ) -> None:
     for idx, action in enumerate(actions):
         if len(action) != 7:
@@ -95,7 +96,7 @@ def send_action_sequence(
         target_rz = angle_rad_to_sdk(target_pose[5])
         gripper_stroke = pos_m_to_sdk(abs(target_gripper[0] - target_gripper[1]))
 
-        piper.MotionCtrl_2(SDK_ENABLE_CODE, 0x00, 100, 0x00)
+        piper.MotionCtrl_2(SDK_ENABLE_CODE, 0x00, motion_speed_percent, 0x00)
         piper.EndPoseCtrl(
             target_x,
             target_y,
@@ -158,6 +159,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wrist-camera-index", type=int, default=1)
     parser.add_argument("--period", type=float, default=0.2, help="Seconds between requests")
     parser.add_argument("--action-delay", type=float, default=0.01, help="Seconds between executing returned actions")
+    parser.add_argument(
+        "--motion-speed-percent",
+        type=int,
+        default=100,
+        help="Motion speed percentage for MotionCtrl_2 (range depends on SDK, commonly 0-100)",
+    )
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument(
@@ -275,7 +282,12 @@ def main() -> None:
                 )
             print("state:", payload["state"])
             print("actions:", actions)
-            send_action_sequence(piper, actions, args.action_delay)
+            send_action_sequence(
+                piper,
+                actions,
+                args.action_delay,
+                args.motion_speed_percent,
+            )
 
             time.sleep(args.period)
     finally:
