@@ -4,6 +4,7 @@ run_libero_eval.py
 Evaluates a trained policy in a LIBERO simulation benchmark task suite.
 """
 
+import base64
 import json
 import logging
 import os
@@ -14,6 +15,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
+import cv2
 import draccus
 import numpy as np
 import tqdm
@@ -254,6 +256,20 @@ def load_initial_states(cfg: GenerateConfig, task_suite, task_id: int, log_file=
         log_message("Using default initial states", log_file)
         return initial_states, None
 
+
+
+def decompress_image_from_base64(base64_string: str) -> np.ndarray:
+    """Decompress base64-encoded JPEG string back to numpy array."""
+    # Decode base64 string to bytes
+    jpg_data = base64.b64decode(base64_string)
+
+    # Decode JPEG data to numpy array
+    img = cv2.imdecode(np.frombuffer(jpg_data, np.uint8), cv2.IMREAD_COLOR)
+
+    # Convert BGR to RGB
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    return img_rgb
 
 
 def prepare_observation(obs, resize_size):
@@ -522,11 +538,15 @@ class Server:
                 # Prepare observation
                 def prepare_observation_modified(obs, resize_size):
                     """Prepare observation for policy input."""
-                    # Get preprocessed images
-                    # img = get_libero_image(obs)
-                    # wrist_img = get_libero_wrist_image(obs)
-                    img = obs["full_image"]
-                    wrist_img = obs["wrist_image"]
+                    # Check if images are compressed
+                    if isinstance(obs.get("full_image"), str) and obs.get("image_format") == "jpeg":
+                        # Decompress images from base64 JPEG
+                        img = decompress_image_from_base64(obs["full_image"])
+                        wrist_img = decompress_image_from_base64(obs["wrist_image"])
+                    else:
+                        # Legacy format - direct RGB arrays
+                        img = np.asarray(obs["full_image"], dtype=np.uint8)
+                        wrist_img = np.asarray(obs["wrist_image"], dtype=np.uint8)
 
                     # Resize images to size expected by model
                     img_resized = resize_image_for_policy(img, resize_size)

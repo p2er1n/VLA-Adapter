@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import base64
 import json
 import math
 from pathlib import Path
@@ -127,6 +128,17 @@ def send_action_sequence(
         time.sleep(action_delay)
 
 
+def compress_image_to_base64(image: np.ndarray, quality: int = 100) -> str:
+    """Compress image to JPEG and encode as base64 string."""
+    # Encode image as JPEG with specified quality
+    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+    _, encoded_img = cv2.imencode('.jpg', image, encode_param)
+
+    # Convert to base64 string
+    base64_string = base64.b64encode(encoded_img).decode('utf-8')
+    return base64_string
+
+
 def build_payload(
     piper: C_PiperInterface_V2,
     instruction: str,
@@ -138,14 +150,16 @@ def build_payload(
     if full_frame is None or wrist_frame is None:
         raise RuntimeError("Latest camera frames are not ready yet")
 
-    full_image = cv2.cvtColor(full_frame, cv2.COLOR_BGR2RGB).tolist()
-    wrist_image = cv2.cvtColor(wrist_frame, cv2.COLOR_BGR2RGB).tolist()
+    # Compress images to base64-encoded JPEG strings
+    full_image_compressed = compress_image_to_base64(full_frame)
+    wrist_image_compressed = compress_image_to_base64(wrist_frame)
 
     payload = {
         "instruction": instruction,
         "state": read_state(piper),
-        "full_image": full_image,
-        "wrist_image": wrist_image,
+        "full_image": full_image_compressed,
+        "wrist_image": wrist_image_compressed,
+        "image_format": "jpeg",  # Indicate compression format
     }
     return payload
 
@@ -157,16 +171,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--can-port", default="can0")
     parser.add_argument("--full-camera-index", type=int, default=0)
     parser.add_argument("--wrist-camera-index", type=int, default=1)
-    parser.add_argument("--period", type=float, default=0.2, help="Seconds between requests")
-    parser.add_argument("--action-delay", type=float, default=0.01, help="Seconds between executing returned actions")
+    parser.add_argument("--period", type=float, default=0, help="Seconds between requests")
+    parser.add_argument("--action-delay", type=float, default=0.2, help="Seconds between executing returned actions")
     parser.add_argument(
         "--motion-speed-percent",
         type=int,
-        default=100,
+        default=2,
         help="Motion speed percentage for MotionCtrl_2 (range depends on SDK, commonly 0-100)",
     )
-    parser.add_argument("--width", type=int, default=640)
-    parser.add_argument("--height", type=int, default=480)
+    parser.add_argument("--width", type=int, default=256)
+    parser.add_argument("--height", type=int, default=256)
     parser.add_argument(
         "--save-request-dir",
         type=str,
@@ -237,10 +251,23 @@ def save_request_record(
     with open(request_dir / "response_raw.txt", "w", encoding="utf-8") as f:
         f.write(response_text)
 
-    full_rgb = np.asarray(payload["full_image"], dtype=np.uint8)
-    wrist_rgb = np.asarray(payload["wrist_image"], dtype=np.uint8)
-    cv2.imwrite(str(request_dir / "full_image.png"), cv2.cvtColor(full_rgb, cv2.COLOR_RGB2BGR))
-    cv2.imwrite(str(request_dir / "wrist_image.png"), cv2.cvtColor(wrist_rgb, cv2.COLOR_RGB2BGR))
+    # Save images based on their format
+    if payload.get("image_format") == "jpeg":
+        # Decode compressed images and save as PNG for viewing
+        full_jpg_data = base64.b64decode(payload["full_image"])
+        wrist_jpg_data = base64.b64decode(payload["wrist_image"])
+
+        full_img = cv2.imdecode(np.frombuffer(full_jpg_data, np.uint8), cv2.IMREAD_COLOR)
+        wrist_img = cv2.imdecode(np.frombuffer(wrist_jpg_data, np.uint8), cv2.IMREAD_COLOR)
+
+        cv2.imwrite(str(request_dir / "full_image.png"), full_img)
+        cv2.imwrite(str(request_dir / "wrist_image.png"), wrist_img)
+    else:
+        # Legacy format - direct RGB arrays
+        full_rgb = np.asarray(payload["full_image"], dtype=np.uint8)
+        wrist_rgb = np.asarray(payload["wrist_image"], dtype=np.uint8)
+        cv2.imwrite(str(request_dir / "full_image.png"), cv2.cvtColor(full_rgb, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(str(request_dir / "wrist_image.png"), cv2.cvtColor(wrist_rgb, cv2.COLOR_RGB2BGR))
 
 
 def main() -> None:
