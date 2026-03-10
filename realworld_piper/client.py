@@ -211,6 +211,12 @@ def configure_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
+    # Verify actual resolution
+    actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if actual_width != width or actual_height != height:
+        print(f"Warning: Camera {index} requested {width}x{height}, got {actual_width}x{actual_height}")
+
     return cap
 
 
