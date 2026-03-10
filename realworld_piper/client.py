@@ -179,6 +179,18 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="Motion speed percentage for MotionCtrl_2 (range depends on SDK, commonly 0-100)",
     )
+    parser.add_argument(
+        "--steps-per-inference",
+        type=int,
+        default=1,
+        help="Number of actions to execute before starting next inference (async mode only)",
+    )
+    parser.add_argument(
+        "--async",
+        action="store_true",
+        dest="async_mode",
+        help="Enable async pipeline mode (overlap inference and execution)",
+    )
     parser.add_argument("--width", type=int, default=256)
     parser.add_argument("--height", type=int, default=256)
     parser.add_argument(
@@ -270,6 +282,132 @@ def save_request_record(
         cv2.imwrite(str(request_dir / "wrist_image.png"), cv2.cvtColor(wrist_rgb, cv2.COLOR_RGB2BGR))
 
 
+class InferenceThread(threading.Thread):
+    """Thread for running inference in background."""
+
+    def __init__(self, session: requests.Session, endpoint: str, payload: dict[str, Any]):
+        super().__init__(daemon=True)
+        self.session = session
+        self.endpoint = endpoint
+        self.payload = payload
+        self.result = None
+        self.error = None
+
+    def run(self):
+        try:
+            response = self.session.post(self.endpoint, json=self.payload, timeout=30)
+            response.raise_for_status()
+            self.result = response.json()
+        except Exception as e:
+            self.error = e
+
+    def is_done(self) -> bool:
+        return not self.is_alive() and self.result is not None
+
+    def get_result(self) -> list[list[float]]:
+        if self.error:
+            raise self.error
+        return self.result
+
+
+def run_async_pipeline(
+    piper: C_PiperInterface_V2,
+    session: requests.Session,
+    server_endpoint: str,
+    actions: list[list[float]],
+    n: int,
+    action_delay: float,
+    motion_speed_percent: int,
+    save_root: Path | None,
+    request_idx: int,
+    instruction: str,
+) -> int:
+    """Run async pipeline mode (overlapping inference and execution)."""
+    actions_executed = 0
+    pending_inference: InferenceThread | None = None
+    actions_executed_at_inference_start = 0
+
+    while True:
+        # Execute first chunk (n steps)
+        chunk_end = min(actions_executed + n, len(actions))
+        chunk = actions[actions_executed:chunk_end]
+        if not chunk:
+            break
+
+        send_action_sequence(piper, chunk, action_delay, motion_speed_percent)
+        actions_executed += len(chunk)
+
+        # After executing first chunk, START next inference in background thread
+        payload = build_payload(piper, instruction)
+        actions_executed_at_inference_start = actions_executed
+        pending_inference = InferenceThread(session, server_endpoint, payload)
+        pending_inference.start()
+
+        # Execute remaining actions one by one, while inference runs in background
+        while actions_executed < len(actions):
+            single = [actions[actions_executed]]
+            send_action_sequence(piper, single, action_delay, motion_speed_percent)
+            actions_executed += 1
+
+            if pending_inference is not None and pending_inference.is_done():
+                raw_actions = pending_inference.get_result()
+                request_idx += 1
+
+                skip_steps = actions_executed - actions_executed_at_inference_start
+                new_actions = raw_actions[skip_steps:] if skip_steps > 0 else raw_actions
+
+                if save_root is not None:
+                    save_request_record(save_root, request_idx, payload, new_actions, "")
+
+                print(f"[Inference {request_idx}] state: {payload['state']}")
+                print(f"[Inference {request_idx}] actions: {new_actions}")
+                print(f"[Inference {request_idx}] skipped first {skip_steps} actions")
+
+                actions = new_actions
+                actions_executed = 0
+
+                chunk = actions[:n]
+                if chunk:
+                    send_action_sequence(piper, chunk, action_delay, motion_speed_percent)
+                    actions_executed = len(chunk)
+
+                    payload = build_payload(piper, instruction)
+                    actions_executed_at_inference_start = actions_executed
+                    pending_inference = InferenceThread(session, server_endpoint, payload)
+                    pending_inference.start()
+                    break
+                else:
+                    pending_inference = None
+                    break
+
+        # If we finished executing all actions but have a pending inference
+        if actions_executed >= len(actions) and pending_inference is not None:
+            pending_inference.join()
+            if pending_inference.error:
+                raise pending_inference.error
+
+            raw_actions = pending_inference.get_result()
+            request_idx += 1
+
+            skip_steps = actions_executed - actions_executed_at_inference_start
+            new_actions = raw_actions[skip_steps:] if skip_steps > 0 else raw_actions
+
+            if save_root is not None:
+                save_request_record(save_root, request_idx, payload, new_actions, "")
+
+            print(f"[Inference {request_idx}] state: {payload['state']}")
+            print(f"[Inference {request_idx}] actions: {new_actions}")
+            print(f"[Inference {request_idx}] skipped first {skip_steps} actions")
+
+            actions = new_actions
+            actions_executed = 0
+            pending_inference = None
+        elif actions_executed >= len(actions):
+            break
+
+    return request_idx
+
+
 def main() -> None:
     args = parse_args()
     save_root = Path(args.save_request_dir) if args.save_request_dir else None
@@ -278,12 +416,14 @@ def main() -> None:
     request_idx = 0
     stop_event = threading.Event()
 
+    # Initialize Piper arm
     piper = C_PiperInterface_V2(args.can_port)
     piper.ConnectPort()
     while not piper.EnablePiper():
         time.sleep(0.01)
     piper.GripperCtrl(0, GRIPPER_EFFORT, SDK_ENABLE_CODE, 0)
 
+    # Initialize cameras
     full_cam = configure_camera(args.full_camera_index, args.width, args.height)
     wrist_cam = configure_camera(args.wrist_camera_index, args.width, args.height)
     capture_thread = threading.Thread(target=capture_worker, args=(full_cam, wrist_cam, stop_event), daemon=True)
@@ -291,32 +431,39 @@ def main() -> None:
 
     try:
         warmup_cameras()
+
+        n = args.steps_per_inference  # steps to execute before next inference (0 = sync mode)
+        action_delay = args.action_delay
+        motion_speed_percent = args.motion_speed_percent
+
+        # Use sessions for connection pooling
+        session = requests.Session()
+
+        # === Main loop ===
         while True:
+            # === First inference (blocking) ===
             payload = build_payload(piper, args.instruction)
-
-            response = requests.post(args.server_endpoint, json=payload, timeout=30)
+            response = session.post(args.server_endpoint, json=payload, timeout=30)
             response.raise_for_status()
-
             actions = response.json()
+            request_idx += 1
+
             if save_root is not None:
-                request_idx += 1
-                save_request_record(
-                    save_root=save_root,
-                    request_idx=request_idx,
-                    payload=payload,
-                    response_json=actions,
-                    response_text=response.text,
-                )
-            print("state:", payload["state"])
-            print("actions:", actions)
-            send_action_sequence(
-                piper,
-                actions,
-                args.action_delay,
-                args.motion_speed_percent,
-            )
+                save_request_record(save_root, request_idx, payload, actions, response.text)
+
+            print(f"[Inference {request_idx}] state: {payload['state']}")
+            print(f"[Inference {request_idx}] actions: {actions}")
+
+            if args.async_mode:
+                # === Async pipeline mode ===
+                run_async_pipeline(piper, session, args.server_endpoint, actions, n, action_delay,
+                                   motion_speed_percent, save_root, request_idx, args.instruction)
+            else:
+                # === Sync mode (original) ===
+                send_action_sequence(piper, actions, action_delay, motion_speed_percent)
 
             time.sleep(args.period)
+
     finally:
         stop_event.set()
         capture_thread.join(timeout=1.0)
