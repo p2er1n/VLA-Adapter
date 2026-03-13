@@ -1,57 +1,12 @@
 """
-Convert teleoperation HDF5 episodes into a LIBERO-style RLDS dataset.
-
-Expected input file format:
-    episode<n>.hdf5
-
-Expected HDF5 keys:
-    /arm/endPose/piper_end                    (T, 6)
-    /gripper/encoderDistance/pika             (T,)
-    /camera/color/pikaDepthCamera             (T, 480, 640, 3)  BGR
-    /camera/color/pikaFisheyeCamera           (T, 480, 640, 3)  BGR
-
-Output step format (per trajectory step):
-    action                (7,)    first 6 dims are EEF deltas; last dim is binary gripper action
-    observation.state     (8,)    first 6 dims are absolute EEF state; last 2 dims are gripper distances
-    observation.image     (256, 256, 3) third-person RGB image
-    observation.wrist_image
-                          (256, 256, 3) wrist RGB image
-    language_instruction          task instruction (stored as tf.string; read back as bytes)
-
-Notes:
-    - The generated dataset is TFDS/RLDS-style. It can be loaded by TensorFlow Datasets as a prepared dataset.
-    - The script only implements the conversion logic described in the file header. It does not try to infer any
-      additional robot semantics beyond those rules.
+HDF5:
+    /arm/endPose/piper                    (T, 6), Piper EEF state
+    /arm/jointStatePosition/piper         (T, 7), Piper joint angles (includes gripper distance)
+    /arm/jointStatePosition/pika_ctrl     (T, 7), Pika joint angles including gripper distance (inversed from pika EEF state, and pika gripper distance)
+    /gripper/encoderDistance/pika         (T,),   Pika gripper distance
+    /camera/color/pikaDepthCamera         (T, 480, 640, 3)  BGR, Wrist camera
+    /camera/color/pikaColorCamera         (T, 480, 640, 3)  BGR, Third-person camera
 """
-
-# 本脚本将多个hdf5文件，转换为libero rlds格式的文件，方便后续训练使用
-# 从指定文件夹读取hdf5文件，文件的命名有固定格式，episode<n>.hdf5，例如：episode0.hdf5, episode1.hdf5, episode40.hdf5等等
-# 每个episode hdf5文件代表最终的rlds数据集的一个episode（即一个轨迹）
-# 原来hdf5文件中的数据含义如下：
-## /arm/endPose/piper_end：（len， 6），表示机械臂的EEF state，绝对值
-## /gripper/encoderDistance/pika：（len， 1）,表示两个夹爪之间的距离，绝对值
-## /camera/color/pikaDepthCamera: (len，480，640，3)，表示腕部摄像头图片，BGR格式，480*640分辨率
-## /camera/color/pikaFisheyeCamera: (len，480，640，3)，表示第三人称摄像头图片，BGR格式，480*640分辨率
-# 转换后的rlds数据集中的数据含义如下（每个轨迹中的一步）：
-## action：（7，），前六维：相对值，EEF格式，表示下一个EEF状态和当前EEF状态的差值；最后一维：绝对值，二值化，-1表示夹爪打开，1表示夹爪闭合
-## obeservation.state：（8，），前六维：绝对值，EEF state，表示机械臂EEF当前的状态（也就是hdf5的piper_end）；后两维：绝对值，第七维表示左夹爪到闭合处的距离（正值），第八维表示右夹爪到闭合处的距离的绝对值的负数（负值），比如：两个夹爪的距离为0.08，第七维为0.04，第八维为-0.04
-## observation.image：（256, 256, 3），第三人称摄像头图片，RGB格式，分辨率为256*256，对应hdf5的pikaFisheyeCamera
-## observation.wrist_image：（256, 256, 3），腕部摄像头图片，RGB格式，分辨率为256*256，对应hdf5的pikaDepthCamera
-## language_instruction：bytes类型数据，表示当前轨迹的任务的指令，从命令行参数中获取
-# 转换步骤：
-## 1. 命令行参数指定文件夹，该文件夹下存放有episode<n>.hdf5命名的文件若干
-## 2. 命令行参数指定遥操作的hdf5文件的范围，例如，0-49，表示按照顺序（按照<n>数值大小从小到大的顺序）将episode0.hdf5到episode49.hdf5转换为rlds数据集中的50个轨迹
-## 3. 命令行参数指定每个轨迹的任务指令，格式为：<language_instruction>-<len>,<language_instruction2>-<len2>, ...，保证所有len相加等于上面指定的范围的长度
-## 4. 命令行指定求差值的间隔，delta，默认为1
-## 5. 命令行指定判定夹爪
-## 6. 加载一个hdf5文件，
-### 这个轨迹的第一步的observation.state[:6] = piper_end[0]，
-### 这个轨迹的第一步的observation.state[-2:] = "encoderDistance/pika"[0]/2，-"encoderDistance/pika"[0]/2
-### 这个轨迹的第一步的observation.image = bgr_to_rgb(resize(pikaFisheyeCamera[0], (256, 256)))
-### 这个轨迹的第一步的observation.wrist_image = bgr_to_rgb(resize(pikaDepthCamera[0], (256, 256)))
-### 这个轨迹的第一步的action[:6] = piper_end[delta] - piper_end[0]
-### 这个轨迹的第一步的action[6]：
-#### 计算两步之间的夹爪距离的差值，设定一个阈值，如果是负值并且绝对值超过阈值，就认为夹爪是“闭合”状态，如果是正值并且绝对值超过阈值，就认为夹爪是“打开”状态，如果绝对值没有超过阈值，就认为夹爪停在当前状态（之前是“闭合”就是“闭合”，之前是“打开”就是“打开”）。
 
 from __future__ import annotations
 
@@ -228,7 +183,7 @@ def load_episode_steps(
     initial_gripper_state: str,
 ) -> List[Dict[str, object]]:
     with h5py.File(hdf5_path, "r") as handle:
-        eef_state = np.asarray(handle["/arm/endPose/piper_end"], dtype=np.float32)
+        eef_state = np.asarray(handle["/arm/endPose/piper"], dtype=np.float32)
         gripper_distance = np.asarray(handle["/gripper/encoderDistance/pika"], dtype=np.float32)
         third_person_bgr = np.asarray(handle["/camera/color/pikaFisheyeCamera"], dtype=np.uint8)
         wrist_bgr = np.asarray(handle["/camera/color/pikaDepthCamera"], dtype=np.uint8)
