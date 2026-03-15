@@ -57,7 +57,8 @@ def parse_instruction_spans(spec: str, expected_count: int) -> List[InstructionS
     spans: List[InstructionSpan] = []
     total = 0
 
-    for raw_chunk in [chunk.strip() for chunk in spec.split(",") if chunk.strip()]:
+    # Use ';' to separate instruction chunks (so ',' and '.' can be used in instructions)
+    for raw_chunk in [chunk.strip() for chunk in spec.split(";") if chunk.strip()]:
         if "-" not in raw_chunk:
             raise ValueError(
                 f"Invalid instruction chunk `{raw_chunk}`. Expected format `<instruction>-<count>`."
@@ -181,9 +182,13 @@ def load_episode_steps(
     delta: int,
     gripper_threshold: float,
     initial_gripper_state: str,
+    control_mode: str = "eef",
 ) -> List[Dict[str, object]]:
     with h5py.File(hdf5_path, "r") as handle:
-        eef_state = np.asarray(handle["/arm/endPose/piper"], dtype=np.float32)
+        if control_mode == "eef":
+            arm_state = np.asarray(handle["/arm/endPose/piper"], dtype=np.float32)
+        else:  # joint
+            arm_state = np.asarray(handle["/arm/jointStatePosition/piper"], dtype=np.float32)
         gripper_distance = np.asarray(handle["/gripper/encoderDistance/pika"], dtype=np.float32)
         third_person_bgr = np.asarray(handle["/camera/color/pikaFisheyeCamera"], dtype=np.uint8)
         wrist_bgr = np.asarray(handle["/camera/color/pikaDepthCamera"], dtype=np.uint8)
@@ -193,7 +198,7 @@ def load_episode_steps(
             f"Expected `/gripper/encoderDistance/pika` to have shape (T,), got {gripper_distance.shape}."
         )
 
-    length = validate_lengths(eef_state, gripper_distance, third_person_bgr, wrist_bgr)
+    length = validate_lengths(arm_state, gripper_distance, third_person_bgr, wrist_bgr)
     if length == 0:
         raise ValueError(f"Episode `{hdf5_path}` is empty.")
     if delta <= 0:
@@ -210,14 +215,24 @@ def load_episode_steps(
     for idx in range(length):
         next_idx = min(idx + delta, length - 1)
 
+        # Create new arrays for each step to avoid sharing references
         action = np.empty((7,), dtype=np.float32)
-        action[:6] = eef_state[next_idx] - eef_state[idx]
-        action[6] = gripper_actions[idx]
 
-        state = np.empty((8,), dtype=np.float32)
-        state[:6] = eef_state[idx]
-        state[6:] = build_gripper_state(gripper_distance[idx])
+        if control_mode == "eef":
+            action[:6] = arm_state[next_idx] - arm_state[idx]
+            action[6] = gripper_actions[idx]
 
+            state = np.empty((8,), dtype=np.float32)
+            state[:6] = arm_state[idx]
+            state[6:] = build_gripper_state(gripper_distance[idx])
+        else:  # joint
+            # Joint mode: use first 6 dimensions of joint angles + 2D gripper from encoder
+            action[:6] = arm_state[next_idx, :6] - arm_state[idx, :6]
+            action[6] = gripper_actions[idx]
+
+            state = np.empty((8,), dtype=np.float32)
+            state[:6] = arm_state[idx, :6]
+            state[6:] = build_gripper_state(gripper_distance[idx])
         step = {
             "observation": {
                 "image": bgr_to_rgb_resized(third_person_bgr[idx]),
@@ -243,9 +258,10 @@ class PikaLiberoRldsBuilder(tfds.core.GeneratorBasedBuilder):
         DATASET_VERSION: "Initial conversion from Pika teleoperation HDF5 to LIBERO-style RLDS."
     }
 
-    def __init__(self, *args, dataset_name: str, episodes: Sequence[List[Dict[str, object]]], **kwargs):
+    def __init__(self, *args, dataset_name: str, episodes: Sequence[List[Dict[str, object]]], control_mode: str = "eef", **kwargs):
         self._dataset_name = dataset_name
         self._episodes = list(episodes)
+        self._control_mode = control_mode
         super().__init__(*args, **kwargs)
 
     @property
@@ -253,6 +269,7 @@ class PikaLiberoRldsBuilder(tfds.core.GeneratorBasedBuilder):
         return self._dataset_name
 
     def _info(self) -> tfds.core.DatasetInfo:
+        # Both EEF and joint modes use 8D state (6D arm + 2D gripper)
         features = tfds.features.FeaturesDict(
             {
                 "steps": tfds.features.Dataset(
@@ -300,6 +317,7 @@ def write_manifest(
     delta: int,
     gripper_threshold: float,
     initial_gripper_state: str,
+    control_mode: str,
 ) -> None:
     manifest = {
         "dataset_name": dataset_name,
@@ -308,6 +326,7 @@ def write_manifest(
         "delta": delta,
         "gripper_delta_threshold": gripper_threshold,
         "initial_gripper_state": initial_gripper_state,
+        "control_mode": control_mode,
         "episodes": [
             {
                 "source_file": str(path),
@@ -350,7 +369,7 @@ def parse_args() -> argparse.Namespace:
         "--instructions",
         type=str,
         required=True,
-        help="Instruction spec in the form `<instruction>-<count>,<instruction2>-<count2>,...`.",
+        help="Instruction spec in the form `<instruction>-<count>;<instruction2>-<count2>;...`. Use semicolon to separate, commas and periods allowed in instructions.",
     )
     parser.add_argument(
         "--delta",
@@ -370,6 +389,13 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "open", "closed"],
         default="auto",
         help="Initial binary gripper state used before any significant gripper delta is observed.",
+    )
+    parser.add_argument(
+        "--control_mode",
+        type=str,
+        choices=["eef", "joint"],
+        default="eef",
+        help="Control mode: 'eef' uses end-effector state (6DoF), 'joint' uses joint angles (7DoF includes gripper).",
     )
     parser.add_argument(
         "--overwrite",
@@ -418,6 +444,7 @@ def main() -> None:
             delta=args.delta,
             gripper_threshold=args.gripper_delta_threshold,
             initial_gripper_state=args.initial_gripper_state,
+            control_mode=args.control_mode,
         )
         episodes.append(steps)
 
@@ -425,6 +452,7 @@ def main() -> None:
         data_dir=str(output_dir),
         dataset_name=args.dataset_name,
         episodes=episodes,
+        control_mode=args.control_mode,
     )
     builder.download_and_prepare()
 
@@ -436,6 +464,7 @@ def main() -> None:
         delta=args.delta,
         gripper_threshold=args.gripper_delta_threshold,
         initial_gripper_state=args.initial_gripper_state,
+        control_mode=args.control_mode,
     )
 
     print(f"Saved dataset `{args.dataset_name}` to {output_dir}")
