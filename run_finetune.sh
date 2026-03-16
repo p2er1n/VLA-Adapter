@@ -5,12 +5,13 @@ run_root_dir=/root/autodl-tmp/outputs
 logs_dir=/root/autodl-tmp/logs
 wandb_dir=/root/autodl-tmp/VLA-Adapter/wandb
 run_note=
-log_file="$logs_dir"/VLA-Adapter-realworld--"$data_name"--"$run_note"--"$bs-$grad_acc_steps-$lr"--$current_time.log
 
 bs=8
 grad_acc_steps=2
 lr=2e-4
 shuffle_buffer_size=10000
+
+log_file="$logs_dir"/VLA-Adapter-realworld--"$data_name"--"$run_note"--"$bs-$grad_acc_steps-$lr-$shuffle_buffer_size"--$current_time.log
 
 # Start wandb sync background process
 (
