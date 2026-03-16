@@ -10,6 +10,7 @@ log_file="$logs_dir"/VLA-Adapter-realworld--"$data_name"--"$run_note"--"$bs-$gra
 bs=8
 grad_acc_steps=2
 lr=2e-4
+shuffle_buffer_size=10000
 
 # Start wandb sync background process
 (
@@ -42,6 +43,7 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-s
 --use_fz False \
 --use_minivlm True \
 --image_aug True \
+--shuffle_buffer_size "$shuffle_buffer_size" \
 --num_steps_before_decay 200000 \
 --max_steps 200005 \
 --save_freq 5000 \
@@ -54,5 +56,5 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-s
 --use_pro_version True \
 --wandb_entity "sjh-xidian-university" \
 --wandb_project "VLA-Adapter-realworld" \
---run_id_note VLA-Adapter-realworld--"$data_name"--"$run_note"--"$bs-$grad_acc_steps-$lr"--$current_time \
+--run_id_note VLA-Adapter-realworld--"$data_name"--"$run_note"--"$bs-$grad_acc_steps-$lr-$shuffle_buffer_size"--$current_time \
 2>&1 | tee "$log_file"
