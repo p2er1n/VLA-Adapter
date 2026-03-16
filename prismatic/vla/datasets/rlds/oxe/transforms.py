@@ -962,4 +962,5 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     "aloha1_put_X_into_pot_300_demos": aloha_dataset_transform,
     ### RealWorld datasets
     "pick_and_place_1_50": libero_dataset_transform,
+    "realworld": libero_dataset_transform,
 }

@@ -69,6 +69,7 @@ class TaskSuite(str, Enum):
     LIBERO_90 = "libero_90"
     
     PICK_AND_PLACE_1_50 = "pick_and_place_1_50"
+    REALWORLD = "realworld"
 
 
 # Define max steps for each task suite
@@ -79,7 +80,8 @@ TASK_MAX_STEPS = {
     TaskSuite.LIBERO_10: 520,  # longest training demo has 505 steps
     TaskSuite.LIBERO_90: 400,  # longest training demo has 373 steps
     
-    TaskSuite.PICK_AND_PLACE_1_50: 200,  # longest training demo has 180 steps
+    TaskSuite.PICK_AND_PLACE_1_50: 200,
+    TaskSuite.REALWORLD: 200,
 }
 
 
