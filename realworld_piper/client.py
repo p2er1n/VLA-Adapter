@@ -24,8 +24,17 @@ CAMERA_WARMUP_SECONDS = 10.0
 GRIPPER_OPEN_STROKE_M = 0.03 * 2.0
 GRIPPER_CLOSE_STROKE_M = 0.01 * 2.0
 SDK_JOINT_MODE_FLAG = 0x01  # Flag for joint mode in MotionCtrl_2
-GRIPPER_EFFORT = 1000
+GRIPPER_EFFORT = 1000  # Default gripper effort (1N = 1000)
+GRIPPER_EFFORT_MIN = 500  # Minimum gripper effort (0.5N)
+GRIPPER_EFFORT_MAX = 3000  # Maximum gripper effort (3N)
 SDK_ENABLE_CODE = 0x01
+SDK_MOTION_CTRL_MODE = 0xAD  # Motion control mode for joint/endpose control
+SDK_ENDPOSE_MODE_FLAG = 0x00  # Flag for endpose mode in MotionCtrl_2
+SDK_MAX_SPEED_PERCENT = 100  # Maximum speed percentage
+SDK_DEFAULT_SPEED_PERCENT = 50  # Default speed percentage when velocity not specified
+GRIPPER_DEADZONE = 200  # Gripper deadzone threshold
+GRIPPER_MAX_STROKE = 80000  # Maximum gripper stroke
+GRIPPER_MIN_STROKE = 0  # Minimum gripper stroke
 FRAME_LOCK = threading.Lock()
 LATEST_FRAMES = {"full": None, "wrist": None}
 
@@ -108,6 +117,48 @@ def angle_rad_to_joint_sdk(value_rad: float) -> int:
     return round(value_rad / JOINT_SCALE_RAD)
 
 
+def clamp_gripper_stroke(stroke: int) -> int:
+    """Clamp gripper stroke to valid range and apply deadzone.
+    
+    Args:
+        stroke: Gripper stroke value
+        
+    Returns:
+        Clamped gripper stroke value
+    """
+    # Apply deadzone
+    if abs(stroke) < GRIPPER_DEADZONE:
+        stroke = 0
+    # Clamp to valid range
+    return max(GRIPPER_MIN_STROKE, min(abs(stroke), GRIPPER_MAX_STROKE))
+
+
+def clamp_gripper_effort(effort: float) -> int:
+    """Convert and clamp gripper effort to SDK units.
+    
+    Args:
+        effort: Gripper effort in Newtons (typical range: 0.5-3.0N)
+        
+    Returns:
+        Gripper effort in SDK units (1000 = 1N)
+    """
+    # Clamp effort to valid range
+    clamped_effort = max(0.5, min(effort, 3.0))
+    return round(clamped_effort * 1000)
+
+
+def clamp_motion_speed(speed: int) -> int:
+    """Clamp motion speed to valid range.
+    
+    Args:
+        speed: Motion speed percentage
+        
+    Returns:
+        Clamped speed value in range [0, 100]
+    """
+    return max(0, min(speed, SDK_MAX_SPEED_PERCENT))
+
+
 def send_action_sequence(
     piper: C_PiperInterface_V2,
     actions: list[list[float]],
@@ -116,6 +167,7 @@ def send_action_sequence(
     control_mode: str = "endpose",
     gripper_open_stroke: float = None,
     gripper_close_stroke: float = None,
+    gripper_effort: float = None,
 ) -> None:
     """Send action sequence to Piper arm.
 
@@ -123,10 +175,11 @@ def send_action_sequence(
         piper: Piper interface instance
         actions: List of actions, each action is [dx, dy, dz, droll, dpitch, dyaw, dgripper]
         action_delay: Delay between actions in seconds
-        motion_speed_percent: Motion speed percentage
+        motion_speed_percent: Motion speed percentage (will be clamped to 0-100)
         control_mode: "endpose" or "joint"
         gripper_open_stroke: Gripper open stroke in meters
         gripper_close_stroke: Gripper close stroke in meters
+        gripper_effort: Gripper effort in Newtons (range: 0.5-3.0N, default: 1.0N)
     """
     for idx, action in enumerate(actions):
         if len(action) != 7:
@@ -147,9 +200,15 @@ def send_action_sequence(
             joint_5 = angle_rad_to_joint_sdk(target_values[4])
             joint_6 = angle_rad_to_joint_sdk(target_values[5])
 
-            # MotionCtrl_2(enable, joint_mode_flag, speed, 0x00)
-            # joint_mode_flag = 0x01 enables joint control
-            piper.MotionCtrl_2(SDK_ENABLE_CODE, SDK_JOINT_MODE_FLAG, motion_speed_percent, 0x00)
+            # Clamp speed to valid range [0, 100]
+            clamped_speed = clamp_motion_speed(motion_speed_percent)
+            
+            # MotionCtrl_1: Initialize motion control
+            piper.MotionCtrl_1(0x00, 0x00, 0x00)
+            
+            # MotionCtrl_2(enable, joint_mode_flag, speed, mode)
+            # Using 0xAD mode for joint control as per ROS callback implementation
+            piper.MotionCtrl_2(SDK_ENABLE_CODE, SDK_JOINT_MODE_FLAG, clamped_speed, SDK_MOTION_CTRL_MODE)
             piper.JointCtrl(joint_1, joint_2, joint_3, joint_4, joint_5, joint_6)
 
             print(f"executed action[{idx}]:", action)
@@ -166,7 +225,7 @@ def send_action_sequence(
                 (joint_1, joint_2, joint_3, joint_4, joint_5, joint_6),
             )
         else:
-            # End pose mode control (original)
+            # End pose mode control
             current_x = pos_m_to_sdk(current_state[0])
             current_y = pos_m_to_sdk(current_state[1])
             current_z = pos_m_to_sdk(current_state[2])
@@ -180,7 +239,15 @@ def send_action_sequence(
             target_ry = angle_rad_to_sdk(target_values[4])
             target_rz = angle_rad_to_sdk(target_values[5])
 
-            piper.MotionCtrl_2(SDK_ENABLE_CODE, 0x00, motion_speed_percent, 0x00)
+            # Clamp speed to valid range [0, 100]
+            clamped_speed = clamp_motion_speed(motion_speed_percent)
+
+            # MotionCtrl_1: Initialize motion control
+            piper.MotionCtrl_1(0x00, 0x00, 0x00)
+            
+            # MotionCtrl_2(enable, endpose_mode_flag, speed, mode)
+            # Using 0xAD mode for endpose control as per ROS callback implementation
+            piper.MotionCtrl_2(SDK_ENABLE_CODE, SDK_ENDPOSE_MODE_FLAG, clamped_speed, SDK_MOTION_CTRL_MODE)
             piper.EndPoseCtrl(
                 target_x,
                 target_y,
@@ -204,11 +271,24 @@ def send_action_sequence(
                 (target_x, target_y, target_z, target_rx, target_ry, target_rz),
             )
 
-        piper.GripperCtrl(gripper_stroke, GRIPPER_EFFORT, SDK_ENABLE_CODE, 0)
+        # Gripper control with deadzone and range limits
+        gripper_stroke = pos_m_to_sdk(abs(target_gripper[0] - target_gripper[1]))
+        gripper_stroke = clamp_gripper_stroke(gripper_stroke)
+        
+        # Use provided gripper effort or default
+        effort_sdk = clamp_gripper_effort(gripper_effort) if gripper_effort else GRIPPER_EFFORT
+        
+        piper.GripperCtrl(gripper_stroke, effort_sdk, SDK_ENABLE_CODE, 0)
         print(
             "GripperCtrl args:",
-            (gripper_stroke, GRIPPER_EFFORT, SDK_ENABLE_CODE, 0),
+            (gripper_stroke, effort_sdk, SDK_ENABLE_CODE, 0),
         )
+        
+        # Final MotionCtrl_2 call for endpose mode (matching ROS pos_callback behavior)
+        # Note: Joint mode does not have this final call, matching ROS joint_callback behavior
+        if control_mode != "joint":
+            piper.MotionCtrl_2(SDK_ENABLE_CODE, SDK_ENDPOSE_MODE_FLAG, clamped_speed, SDK_MOTION_CTRL_MODE)
+        
         time.sleep(action_delay)
 
 
@@ -303,6 +383,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.02,
         help="Gripper close stroke in meters (default: 0.02)",
+    )
+    parser.add_argument(
+        "--gripper-effort",
+        type=float,
+        default=None,
+        help="Gripper effort in Newtons (range: 0.5-3.0N, default: 1.0N)",
     )
     return parser.parse_args()
 
@@ -435,6 +521,7 @@ def run_async_pipeline(
     control_mode: str = "endpose",
     gripper_open_stroke: float = None,
     gripper_close_stroke: float = None,
+    gripper_effort: float = None,
 ) -> int:
     """Run async pipeline mode (overlapping inference and execution)."""
     actions_executed = 0
@@ -449,7 +536,7 @@ def run_async_pipeline(
             break
 
         send_action_sequence(piper, chunk, action_delay, motion_speed_percent,
-                            control_mode, gripper_open_stroke, gripper_close_stroke)
+                            control_mode, gripper_open_stroke, gripper_close_stroke, gripper_effort)
         actions_executed += len(chunk)
 
         # After executing first chunk, START next inference in background thread
@@ -485,7 +572,7 @@ def run_async_pipeline(
                 chunk = actions[:n]
                 if chunk:
                     send_action_sequence(piper, chunk, action_delay, motion_speed_percent,
-                            control_mode, gripper_open_stroke, gripper_close_stroke)
+                            control_mode, gripper_open_stroke, gripper_close_stroke, gripper_effort)
                     actions_executed = len(chunk)
 
                     payload = build_payload(piper, instruction, control_mode)
@@ -575,11 +662,13 @@ def main() -> None:
                 # === Async pipeline mode ===
                 run_async_pipeline(piper, session, args.server_endpoint, actions, n, action_delay,
                                    motion_speed_percent, save_root, request_idx, args.instruction,
-                                   args.control_mode, args.gripper_open_stroke, args.gripper_close_stroke)
+                                   args.control_mode, args.gripper_open_stroke, args.gripper_close_stroke,
+                                   args.gripper_effort)
             else:
                 # === Sync mode (original) ===
                 send_action_sequence(piper, actions, action_delay, motion_speed_percent,
-                            args.control_mode, args.gripper_open_stroke, args.gripper_close_stroke)
+                            args.control_mode, args.gripper_open_stroke, args.gripper_close_stroke,
+                            args.gripper_effort)
 
             time.sleep(args.period)
 
