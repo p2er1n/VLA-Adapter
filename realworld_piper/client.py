@@ -19,9 +19,11 @@ from piper_sdk import C_PiperInterface_V2
 
 POS_SCALE_M = 1e-6
 ANGLE_SCALE_RAD = math.pi / 180000.0
+JOINT_SCALE_RAD = math.pi / 180000.0  # Joint angle scale (0.001 degrees to radians)
 CAMERA_WARMUP_SECONDS = 10.0
 GRIPPER_OPEN_STROKE_M = 0.03 * 2.0
 GRIPPER_CLOSE_STROKE_M = 0.01 * 2.0
+SDK_JOINT_MODE_FLAG = 0x01  # Flag for joint mode in MotionCtrl_2
 GRIPPER_EFFORT = 1000
 SDK_ENABLE_CODE = 0x01
 FRAME_LOCK = threading.Lock()
@@ -50,6 +52,22 @@ def read_eef_state_m(piper: C_PiperInterface_V2) -> list[float]:
     ]
 
 
+def read_joint_state_m(piper: C_PiperInterface_V2) -> list[float]:
+    """Read joint angles in radians (6 joints + gripper)."""
+    raw_msg = piper.GetArmJointMsgs()
+    joint_state = raw_msg.joint_state
+
+    # Convert from 0.001 degrees to radians
+    return [
+        float(joint_state.joint_1) * JOINT_SCALE_RAD,
+        float(joint_state.joint_2) * JOINT_SCALE_RAD,
+        float(joint_state.joint_3) * JOINT_SCALE_RAD,
+        float(joint_state.joint_4) * JOINT_SCALE_RAD,
+        float(joint_state.joint_5) * JOINT_SCALE_RAD,
+        float(joint_state.joint_6) * JOINT_SCALE_RAD,
+    ]
+
+
 def read_gripper_qpos_m(piper: C_PiperInterface_V2) -> list[float]:
     raw_msg = piper.GetArmGripperMsgs()
     stroke = raw_msg.gripper_state.grippers_angle
@@ -59,14 +77,35 @@ def read_gripper_qpos_m(piper: C_PiperInterface_V2) -> list[float]:
     return [half, -half]
 
 
-def read_state(piper: C_PiperInterface_V2) -> list[float]:
-    return read_eef_state_m(piper) + read_gripper_qpos_m(piper)
+def read_state(piper: C_PiperInterface_V2, control_mode: str = "endpose") -> list[float]:
+    """Read current state based on control mode.
+
+    Args:
+        piper: Piper interface instance
+        control_mode: "endpose" for end-effector pose, "joint" for joint angles
+
+    Returns:
+        List of 8 floats: 6 pose/joint values + 2 gripper values
+    """
+    if control_mode == "joint":
+        return read_joint_state_m(piper) + read_gripper_qpos_m(piper)
+    else:
+        return read_eef_state_m(piper) + read_gripper_qpos_m(piper)
 
 
-def target_gripper_qpos(gripper_action: float) -> list[float]:
-    stroke_m = GRIPPER_OPEN_STROKE_M if gripper_action < 0 else GRIPPER_CLOSE_STROKE_M
+def target_gripper_qpos(gripper_action: float, open_stroke: float = None, close_stroke: float = None) -> list[float]:
+    if open_stroke is None:
+        open_stroke = GRIPPER_OPEN_STROKE_M
+    if close_stroke is None:
+        close_stroke = GRIPPER_CLOSE_STROKE_M
+    stroke_m = open_stroke if gripper_action < 0 else close_stroke
     half = stroke_m / 2.0
     return [half, -half]
+
+
+def angle_rad_to_joint_sdk(value_rad: float) -> int:
+    """Convert radians to joint SDK units (0.001 degrees)."""
+    return round(value_rad / JOINT_SCALE_RAD)
 
 
 def send_action_sequence(
@@ -74,53 +113,98 @@ def send_action_sequence(
     actions: list[list[float]],
     action_delay: float,
     motion_speed_percent: int,
+    control_mode: str = "endpose",
+    gripper_open_stroke: float = None,
+    gripper_close_stroke: float = None,
 ) -> None:
+    """Send action sequence to Piper arm.
+
+    Args:
+        piper: Piper interface instance
+        actions: List of actions, each action is [dx, dy, dz, droll, dpitch, dyaw, dgripper]
+        action_delay: Delay between actions in seconds
+        motion_speed_percent: Motion speed percentage
+        control_mode: "endpose" or "joint"
+        gripper_open_stroke: Gripper open stroke in meters
+        gripper_close_stroke: Gripper close stroke in meters
+    """
     for idx, action in enumerate(actions):
         if len(action) != 7:
             raise RuntimeError(f"Expected action length 7, got {len(action)} at index {idx}")
 
-        current_state = read_state(piper)
-        target_pose = [current_state[i] + float(action[i]) for i in range(6)]
-        target_gripper = target_gripper_qpos(float(action[6]))
-        current_x = pos_m_to_sdk(current_state[0])
-        current_y = pos_m_to_sdk(current_state[1])
-        current_z = pos_m_to_sdk(current_state[2])
-        current_rx = angle_rad_to_sdk(current_state[3])
-        current_ry = angle_rad_to_sdk(current_state[4])
-        current_rz = angle_rad_to_sdk(current_state[5])
+        current_state = read_state(piper, control_mode)
+        target_values = [current_state[i] + float(action[i]) for i in range(6)]
+        target_gripper = target_gripper_qpos(float(action[6]), gripper_open_stroke, gripper_close_stroke)
         current_gripper_stroke = pos_m_to_sdk(abs(current_state[6] - current_state[7]))
-        target_x = pos_m_to_sdk(target_pose[0])
-        target_y = pos_m_to_sdk(target_pose[1])
-        target_z = pos_m_to_sdk(target_pose[2])
-        target_rx = angle_rad_to_sdk(target_pose[3])
-        target_ry = angle_rad_to_sdk(target_pose[4])
-        target_rz = angle_rad_to_sdk(target_pose[5])
         gripper_stroke = pos_m_to_sdk(abs(target_gripper[0] - target_gripper[1]))
 
-        piper.MotionCtrl_2(SDK_ENABLE_CODE, 0x00, motion_speed_percent, 0x00)
-        piper.EndPoseCtrl(
-            target_x,
-            target_y,
-            target_z,
-            target_rx,
-            target_ry,
-            target_rz,
-        )
-        piper.GripperCtrl(gripper_stroke, GRIPPER_EFFORT, SDK_ENABLE_CODE, 0)
+        if control_mode == "joint":
+            # Joint mode control
+            joint_1 = angle_rad_to_joint_sdk(target_values[0])
+            joint_2 = angle_rad_to_joint_sdk(target_values[1])
+            joint_3 = angle_rad_to_joint_sdk(target_values[2])
+            joint_4 = angle_rad_to_joint_sdk(target_values[3])
+            joint_5 = angle_rad_to_joint_sdk(target_values[4])
+            joint_6 = angle_rad_to_joint_sdk(target_values[5])
 
-        print(f"executed action[{idx}]:", action)
-        print(
-            "previous_state_api_units:",
-            (current_x, current_y, current_z, current_rx, current_ry, current_rz, current_gripper_stroke),
-        )
-        print(
-            "target_state_api_units:",
-            (target_x, target_y, target_z, target_rx, target_ry, target_rz, gripper_stroke),
-        )
-        print(
-            "EndPoseCtrl args:",
-            (target_x, target_y, target_z, target_rx, target_ry, target_rz),
-        )
+            # MotionCtrl_2(enable, joint_mode_flag, speed, 0x00)
+            # joint_mode_flag = 0x01 enables joint control
+            piper.MotionCtrl_2(SDK_ENABLE_CODE, SDK_JOINT_MODE_FLAG, motion_speed_percent, 0x00)
+            piper.JointCtrl(joint_1, joint_2, joint_3, joint_4, joint_5, joint_6)
+
+            print(f"executed action[{idx}]:", action)
+            print(
+                "previous_state_api_units (joint):",
+                tuple(angle_rad_to_joint_sdk(current_state[i]) for i in range(6)),
+            )
+            print(
+                "target_state_api_units (joint):",
+                (joint_1, joint_2, joint_3, joint_4, joint_5, joint_6),
+            )
+            print(
+                "JointCtrl args:",
+                (joint_1, joint_2, joint_3, joint_4, joint_5, joint_6),
+            )
+        else:
+            # End pose mode control (original)
+            current_x = pos_m_to_sdk(current_state[0])
+            current_y = pos_m_to_sdk(current_state[1])
+            current_z = pos_m_to_sdk(current_state[2])
+            current_rx = angle_rad_to_sdk(current_state[3])
+            current_ry = angle_rad_to_sdk(current_state[4])
+            current_rz = angle_rad_to_sdk(current_state[5])
+            target_x = pos_m_to_sdk(target_values[0])
+            target_y = pos_m_to_sdk(target_values[1])
+            target_z = pos_m_to_sdk(target_values[2])
+            target_rx = angle_rad_to_sdk(target_values[3])
+            target_ry = angle_rad_to_sdk(target_values[4])
+            target_rz = angle_rad_to_sdk(target_values[5])
+
+            piper.MotionCtrl_2(SDK_ENABLE_CODE, 0x00, motion_speed_percent, 0x00)
+            piper.EndPoseCtrl(
+                target_x,
+                target_y,
+                target_z,
+                target_rx,
+                target_ry,
+                target_rz,
+            )
+
+            print(f"executed action[{idx}]:", action)
+            print(
+                "previous_state_api_units:",
+                (current_x, current_y, current_z, current_rx, current_ry, current_rz, current_gripper_stroke),
+            )
+            print(
+                "target_state_api_units:",
+                (target_x, target_y, target_z, target_rx, target_ry, target_rz, gripper_stroke),
+            )
+            print(
+                "EndPoseCtrl args:",
+                (target_x, target_y, target_z, target_rx, target_ry, target_rz),
+            )
+
+        piper.GripperCtrl(gripper_stroke, GRIPPER_EFFORT, SDK_ENABLE_CODE, 0)
         print(
             "GripperCtrl args:",
             (gripper_stroke, GRIPPER_EFFORT, SDK_ENABLE_CODE, 0),
@@ -142,6 +226,7 @@ def compress_image_to_base64(image: np.ndarray, quality: int = 100) -> str:
 def build_payload(
     piper: C_PiperInterface_V2,
     instruction: str,
+    control_mode: str = "endpose",
 ) -> dict[str, Any]:
     with FRAME_LOCK:
         full_frame = None if LATEST_FRAMES["full"] is None else LATEST_FRAMES["full"].copy()
@@ -156,7 +241,8 @@ def build_payload(
 
     payload = {
         "instruction": instruction,
-        "state": read_state(piper),
+        "state": read_state(piper, control_mode),
+        "control_mode": control_mode,
         "full_image": full_image_compressed,
         "wrist_image": wrist_image_compressed,
         "image_format": "jpeg",  # Indicate compression format
@@ -198,6 +284,25 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="If set, save each request/response/images to a per-request subfolder in this directory",
+    )
+    parser.add_argument(
+        "--control-mode",
+        type=str,
+        default="endpose",
+        choices=["endpose", "joint"],
+        help="Control mode: endpose (end-effector pose) or joint (joint angles)",
+    )
+    parser.add_argument(
+        "--gripper-open-stroke",
+        type=float,
+        default=0.06,
+        help="Gripper open stroke in meters (default: 0.06)",
+    )
+    parser.add_argument(
+        "--gripper-close-stroke",
+        type=float,
+        default=0.02,
+        help="Gripper close stroke in meters (default: 0.02)",
     )
     return parser.parse_args()
 
@@ -327,6 +432,9 @@ def run_async_pipeline(
     save_root: Path | None,
     request_idx: int,
     instruction: str,
+    control_mode: str = "endpose",
+    gripper_open_stroke: float = None,
+    gripper_close_stroke: float = None,
 ) -> int:
     """Run async pipeline mode (overlapping inference and execution)."""
     actions_executed = 0
@@ -340,11 +448,12 @@ def run_async_pipeline(
         if not chunk:
             break
 
-        send_action_sequence(piper, chunk, action_delay, motion_speed_percent)
+        send_action_sequence(piper, chunk, action_delay, motion_speed_percent,
+                            control_mode, gripper_open_stroke, gripper_close_stroke)
         actions_executed += len(chunk)
 
         # After executing first chunk, START next inference in background thread
-        payload = build_payload(piper, instruction)
+        payload = build_payload(piper, instruction, control_mode)
         actions_executed_at_inference_start = actions_executed
         pending_inference = InferenceThread(session, server_endpoint, payload)
         pending_inference.start()
@@ -352,7 +461,8 @@ def run_async_pipeline(
         # Execute remaining actions one by one, while inference runs in background
         while actions_executed < len(actions):
             single = [actions[actions_executed]]
-            send_action_sequence(piper, single, action_delay, motion_speed_percent)
+            send_action_sequence(piper, single, action_delay, motion_speed_percent,
+                                control_mode, gripper_open_stroke, gripper_close_stroke)
             actions_executed += 1
 
             if pending_inference is not None and pending_inference.is_done():
@@ -374,10 +484,11 @@ def run_async_pipeline(
 
                 chunk = actions[:n]
                 if chunk:
-                    send_action_sequence(piper, chunk, action_delay, motion_speed_percent)
+                    send_action_sequence(piper, chunk, action_delay, motion_speed_percent,
+                            control_mode, gripper_open_stroke, gripper_close_stroke)
                     actions_executed = len(chunk)
 
-                    payload = build_payload(piper, instruction)
+                    payload = build_payload(piper, instruction, control_mode)
                     actions_executed_at_inference_start = actions_executed
                     pending_inference = InferenceThread(session, server_endpoint, payload)
                     pending_inference.start()
@@ -448,7 +559,7 @@ def main() -> None:
         # === Main loop ===
         while True:
             # === First inference (blocking) ===
-            payload = build_payload(piper, args.instruction)
+            payload = build_payload(piper, args.instruction, args.control_mode)
             response = session.post(args.server_endpoint, json=payload, timeout=30)
             response.raise_for_status()
             actions = response.json()
@@ -463,10 +574,12 @@ def main() -> None:
             if args.async_mode:
                 # === Async pipeline mode ===
                 run_async_pipeline(piper, session, args.server_endpoint, actions, n, action_delay,
-                                   motion_speed_percent, save_root, request_idx, args.instruction)
+                                   motion_speed_percent, save_root, request_idx, args.instruction,
+                                   args.control_mode, args.gripper_open_stroke, args.gripper_close_stroke)
             else:
                 # === Sync mode (original) ===
-                send_action_sequence(piper, actions, action_delay, motion_speed_percent)
+                send_action_sequence(piper, actions, action_delay, motion_speed_percent,
+                            args.control_mode, args.gripper_open_stroke, args.gripper_close_stroke)
 
             time.sleep(args.period)
 
